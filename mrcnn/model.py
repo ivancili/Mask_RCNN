@@ -1005,7 +1005,7 @@ def build_fpn_mask_graph(rois, feature_maps, image_meta,
     return x
 
 
-def build_mask_discriminator_graph(mrcnn_mask, target_mask, train_bn=True):
+def build_discriminator_graph(input_tensor, train_bn=True):
     """Builds the computation graph of the discriminator.
 
     mrcnn_mask:
@@ -1022,26 +1022,22 @@ def build_mask_discriminator_graph(mrcnn_mask, target_mask, train_bn=True):
     # True -> target_mask
     # False -> mrcnn_mask
 
-    input_picker = tf.cast(tf.random.uniform(maxval=1, dtype=tf.int32), tf.bool)
-
-    input_switch = K.switch(
-        input_picker,
-        target_mask,
-        mrcnn_mask
-    )
-
-    x = KL.Conv2D(32, (3, 3), activation="relu", padding="same", name="discriminator_conv1")(input_switch)
+    x = KL.Conv2D(32, (3, 3), activation="relu", padding="same", name="discriminator_conv1")(input_tensor)
     x = KL.BatchNormalization(name="discriminator_bn1")(x, training=train_bn)
 
     x = KL.Conv2D(32, (3, 3), activation="relu", padding="same", name="discriminator_conv2")(x)
     x = KL.BatchNormalization(name="discriminator_bn2")(x, training=train_bn)
     x = KL.MaxPooling2D(pool_size=(2, 2), name="discriminator_pool1")(x)
 
+    x = KL.Conv2D(16, (3, 3), activation="relu", padding="same", name="discriminator_conv3")(x)
+    x = KL.BatchNormalization(name="discriminator_bn3")(x, training=train_bn)
+    x = KL.MaxPooling2D(pool_size=(2, 2), name="discriminator_pool2")(x)
+
     x = KL.Flatten(name="discriminator_flat1")(x)
     x = KL.Dense(128, activation='relu', name="discriminator_dense1")(x)
     x = KL.Dense(1, activation='softmax', name="discriminator_dense2")(x)
 
-    return x, input_switch
+    return x
 
 ############################################################
 #  Loss Functions
@@ -1217,23 +1213,15 @@ def mrcnn_mask_loss_graph(target_masks, target_class_ids, pred_masks):
     return loss
 
 
-def mrcnn_mask_discriminator_loss_graph(mask_discriminator_model, input_picker):
+def mrcnn_discriminator_loss_graph(target_discriminator, mask_discriminator):
     """Mask binary cross-entropy loss for the discriminator.
 
     mask_discriminator_model: discriminator network.
     input_picker: logical switch (target mask input / generated mask input)
     """
 
-    output = K.switch(
-        input_picker,
-        tf.constant(0, dtype=tf.int32),
-        tf.constant(1, dtype=tf.int32),
-    )
-
-    _loss = K.binary_crossentropy(target=mask_discriminator_model, output=output)
-    _loss = K.mean(_loss)
-
-    return _loss
+    _target_loss = -tf.reduce_mean(tf.log(target_discriminator) + tf.log(1 - mask_discriminator))
+    return _target_loss
 
 
 ############################################################
@@ -2062,11 +2050,8 @@ class MaskRCNN():
 
             # ivan
             if config.USE_UPGRADES:
-                mask_discriminator, input_picker = build_mask_discriminator_graph(
-                    mrcnn_mask,
-                    target_mask,
-                    train_bn=config.TRAIN_BN
-                )
+                mask_discriminator = build_discriminator_graph(mrcnn_mask, train_bn=config.TRAIN_BN)
+                target_discriminator = build_discriminator_graph(target_mask, train_bn=config.TRAIN_BN)
 
             # TODO: clean up (use tf.identify if necessary)
             output_rois = KL.Lambda(lambda x: x * 1, name="output_rois")(rois)
@@ -2085,8 +2070,8 @@ class MaskRCNN():
 
             # ivan
             if config.USE_UPGRADES:
-                mask_discriminator_loss = KL.Lambda(lambda x: mrcnn_mask_discriminator_loss_graph(*x), name="mask_discriminator_loss")(
-                    [mask_discriminator, input_picker])
+                discriminator_loss = KL.Lambda(lambda x: mrcnn_discriminator_loss_graph(*x), name="mrcnn_discriminator_loss")(
+                    [target_discriminator, mask_discriminator])
 
             # Model
             inputs = [input_image, input_image_meta,
@@ -2100,7 +2085,7 @@ class MaskRCNN():
 
             # ivan
             if config.USE_UPGRADES:
-                outputs.extend([mask_discriminator, mask_discriminator_loss])
+                outputs.extend([mask_discriminator, target_discriminator, discriminator_loss])
 
             model = KM.Model(inputs, outputs, name='mask_rcnn')
         else:
@@ -2243,7 +2228,7 @@ class MaskRCNN():
 
         # ivan
         if self.config.USE_UPGRADES:
-            loss_names.append("mask_discriminator_loss")
+            loss_names.append("mrcnn_discriminator_loss")
 
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
