@@ -1035,7 +1035,7 @@ def build_discriminator_graph(input_tensor, train_bn=True):
 
     x = KL.Flatten(name="discriminator_flat1")(x)
     x = KL.Dense(128, activation='relu', name="discriminator_dense1")(x)
-    x = KL.Dense(1, activation='softmax', name="discriminator_dense2")(x)
+    x = KL.Dense(1, activation='sigmoid', name="discriminator_dense2")(x)
 
     return x
 
